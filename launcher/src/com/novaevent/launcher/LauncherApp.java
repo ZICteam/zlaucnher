@@ -233,6 +233,7 @@ public final class LauncherApp {
     private volatile String newsHtml = "";
     private volatile boolean launcherWindowHiddenForGame;
     private volatile String serverStatusRequestKey = "";
+    private volatile boolean launcherUpdateCheckStarted;
     private PageView currentPageView = PageView.HOME;
     private SettingsTabView currentSettingsTabView = SettingsTabView.GENERAL;
 
@@ -439,6 +440,7 @@ public final class LauncherApp {
         updateAuthModeUi();
         refreshSkinPreviewAsync();
         frame.setVisible(true);
+        checkLauncherUpdatesAsync();
 
         log("Launcher directory: " + projectDir.resolve("launcher"));
         log("Instances directory: " + instancesDir);
@@ -485,6 +487,127 @@ public final class LauncherApp {
         config.launcherWindowX = frame.getX();
         config.launcherWindowY = frame.getY();
         scheduleConfigSave();
+    }
+
+    private void checkLauncherUpdatesAsync() {
+        if (launcherUpdateCheckStarted) {
+            return;
+        }
+        launcherUpdateCheckStarted = true;
+        Thread thread = new Thread(() -> {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(java.net.URI.create(LauncherMetadata.LATEST_RELEASE_API_URL))
+                        .timeout(Duration.ofSeconds(12))
+                        .header("Accept", "application/vnd.github+json")
+                        .header("User-Agent", LauncherMetadata.USER_AGENT)
+                        .GET()
+                        .build();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    log("Launcher update check failed with HTTP " + response.statusCode());
+                    return;
+                }
+
+                JsonObject release = GSON.fromJson(response.body(), JsonObject.class);
+                if (release == null) {
+                    return;
+                }
+                String latestTag = safeTrim(stringValue(release, "tag_name"));
+                String releaseUrl = safeTrim(stringValue(release, "html_url"));
+                if (latestTag.isBlank()) {
+                    return;
+                }
+                if (isNewerVersion(latestTag, LauncherMetadata.VERSION)) {
+                    log("Launcher update available: " + latestTag + " (current " + LauncherMetadata.VERSION + ")");
+                    SwingUtilities.invokeLater(() -> promptLauncherUpdate(latestTag, releaseUrl.isBlank() ? LauncherMetadata.RELEASES_URL : releaseUrl));
+                }
+            } catch (Exception ex) {
+                log("Launcher update check skipped: " + ex.getMessage());
+            }
+        }, "launcher-update-check");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void promptLauncherUpdate(String latestTag, String releaseUrl) {
+        if (frame == null || !frame.isDisplayable()) {
+            return;
+        }
+        int option = JOptionPane.showConfirmDialog(
+                frame,
+                "Доступна новая версия launcher-а: " + latestTag + "\nОткрыть страницу релиза?",
+                "Обновление launcher-а",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.INFORMATION_MESSAGE
+        );
+        if (option == JOptionPane.YES_OPTION) {
+            openUrlInBrowser(releaseUrl);
+        }
+    }
+
+    private boolean isNewerVersion(String candidateVersion, String currentVersion) {
+        int[] candidate = normalizeVersion(candidateVersion);
+        int[] current = normalizeVersion(currentVersion);
+        int max = Math.max(candidate.length, current.length);
+        for (int index = 0; index < max; index++) {
+            int left = index < candidate.length ? candidate[index] : 0;
+            int right = index < current.length ? current[index] : 0;
+            if (left > right) {
+                return true;
+            }
+            if (left < right) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private int[] normalizeVersion(String rawVersion) {
+        String cleaned = safeTrim(rawVersion).replaceFirst("^[vV]", "");
+        if (cleaned.isBlank()) {
+            return new int[]{0};
+        }
+        String[] parts = cleaned.split("[^0-9]+");
+        int[] normalized = new int[Math.max(1, parts.length)];
+        int count = 0;
+        for (String part : parts) {
+            if (part == null || part.isBlank()) {
+                continue;
+            }
+            try {
+                normalized[count++] = Integer.parseInt(part);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (count == 0) {
+            return new int[]{0};
+        }
+        if (count == normalized.length) {
+            return normalized;
+        }
+        int[] trimmed = new int[count];
+        System.arraycopy(normalized, 0, trimmed, 0, count);
+        return trimmed;
+    }
+
+    private String stringValue(JsonObject object, String property) {
+        if (object == null || property == null || !object.has(property) || object.get(property).isJsonNull()) {
+            return "";
+        }
+        return object.get(property).getAsString();
+    }
+
+    private void openUrlInBrowser(String url) {
+        try {
+            if (!Desktop.isDesktopSupported()) {
+                log("Desktop browse is not supported on this system.");
+                return;
+            }
+            Desktop.getDesktop().browse(java.net.URI.create(url));
+        } catch (Exception ex) {
+            log("Could not open URL: " + ex.getMessage());
+        }
     }
 
     private JPanel createSidebar() {

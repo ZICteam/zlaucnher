@@ -329,19 +329,33 @@ public final class LauncherApp {
                     .getCodeSource()
                     .getLocation()
                     .toURI());
-            Path maybeProjectDir;
-            if (Files.isRegularFile(codeSource)) {
-                maybeProjectDir = codeSource.getParent().getParent().getParent();
-            } else {
-                maybeProjectDir = codeSource.getParent().getParent().getParent();
+            Path discoveredProjectDir = findProjectDirNear(codeSource);
+            if (discoveredProjectDir != null) {
+                return discoveredProjectDir.toAbsolutePath().normalize();
             }
-            if (maybeProjectDir != null && Files.isDirectory(maybeProjectDir.resolve("launcher"))) {
-                return maybeProjectDir.toAbsolutePath().normalize();
+            if (Files.isRegularFile(codeSource) && codeSource.getParent() != null) {
+                return codeSource.getParent().toAbsolutePath().normalize();
             }
         } catch (URISyntaxException | NullPointerException ignored) {
         }
 
         return Path.of(".").toAbsolutePath().normalize();
+    }
+
+    private static Path findProjectDirNear(Path codeSource) {
+        if (codeSource == null) {
+            return null;
+        }
+        Path current = Files.isDirectory(codeSource) ? codeSource : codeSource.getParent();
+        int depth = 0;
+        while (current != null && depth < 6) {
+            if (Files.isDirectory(current.resolve("launcher"))) {
+                return current;
+            }
+            current = current.getParent();
+            depth++;
+        }
+        return null;
     }
 
     private void show() {

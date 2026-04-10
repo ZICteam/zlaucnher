@@ -2825,14 +2825,30 @@ public final class LauncherApp {
                             throw new IllegalStateException("Enter your Ely.by password.");
                         }
                         log("Authenticating with Ely.by...");
-                        session = authenticator.authenticate(resolvedUsername, password, currentConfig.savedClientToken);
-                        saveAuthenticatedSession(currentConfig, session);
-                        log("Authenticated as " + session.username());
+                        try {
+                            session = authenticator.authenticate(resolvedUsername, password, currentConfig.savedClientToken);
+                            saveAuthenticatedSession(currentConfig, session);
+                            log("Authenticated as " + session.username());
+                        } catch (Exception ex) {
+                            ElySession savedSessionFallback = tryUseSavedSessionWithoutRefresh(currentConfig, resolvedUsername, ex);
+                            if (savedSessionFallback != null) {
+                                session = savedSessionFallback;
+                            } else if (isElyServiceUnavailable(ex)) {
+                                session = ElySession.offline(resolvedUsername);
+                                log("Ely.by is unavailable. Skipping online authorization and launching offline as " + session.username() + ".");
+                            } else {
+                                throw ex;
+                            }
+                        }
                     }
                     if (username.isBlank() && !session.username().isBlank()) {
                         usernameField.setText(session.username());
                     }
-                    checkAuthenticatedSkinAsync(session);
+                    if (!session.offline()) {
+                        checkAuthenticatedSkinAsync(session);
+                    } else {
+                        log("Skipping Ely.by skin check because launch is using offline fallback.");
+                    }
                 }
 
                 Process process = launchService.launch(session, currentConfig);
@@ -3676,7 +3692,18 @@ public final class LauncherApp {
 
                 log("Authenticating with Ely.by...");
                 ElyAuthenticator authenticator = new ElyAuthenticator(httpClient);
-                ElySession session = authenticator.authenticate(username, password, currentConfig.savedClientToken);
+                ElySession session;
+                try {
+                    session = authenticator.authenticate(username, password, currentConfig.savedClientToken);
+                } catch (Exception ex) {
+                    ElySession savedSessionFallback = tryUseSavedSessionWithoutRefresh(currentConfig, username, ex);
+                    if (savedSessionFallback != null) {
+                        session = savedSessionFallback;
+                        log("Using saved Ely.by session because the service is temporarily unavailable.");
+                    } else {
+                        throw ex;
+                    }
+                }
                 saveAuthenticatedSession(currentConfig, session);
                 passwordField.setText("");
                 log("Authenticated as " + session.username());
@@ -3738,6 +3765,10 @@ public final class LauncherApp {
             saveAuthenticatedSession(currentConfig, session);
             return session;
         } catch (Exception ex) {
+            ElySession savedSessionFallback = tryUseSavedSessionWithoutRefresh(currentConfig, nickname, ex);
+            if (savedSessionFallback != null) {
+                return savedSessionFallback;
+            }
             log("Saved Ely.by session expired or invalid, using plain offline mode.");
             clearSavedSession(currentConfig);
             try {
@@ -3790,7 +3821,9 @@ public final class LauncherApp {
             try {
                 status = describeSkinStatus(profileUuid);
             } catch (Exception ex) {
-                status = "Check failed: " + ex.getMessage();
+                status = isElyServiceUnavailable(ex)
+                        ? "Ely.by недоступен, проверка пропущена"
+                        : "Check failed: " + ex.getMessage();
             }
 
             String finalStatus = status;
@@ -3814,8 +3847,14 @@ public final class LauncherApp {
                 status = describeSkinStatus(profileUuid);
                 log("Ely skin check for " + profileName + ": " + status);
             } catch (Exception ex) {
-                status = "Check failed: " + ex.getMessage();
-                log("Ely skin check failed for " + profileName + ": " + ex.getMessage());
+                status = isElyServiceUnavailable(ex)
+                        ? "Ely.by недоступен, проверка пропущена"
+                        : "Check failed: " + ex.getMessage();
+                if (isElyServiceUnavailable(ex)) {
+                    log("Ely skin check skipped for " + profileName + ": Ely.by is unavailable.");
+                } else {
+                    log("Ely skin check failed for " + profileName + ": " + ex.getMessage());
+                }
             }
 
             String finalStatus = status;
@@ -3955,7 +3994,9 @@ public final class LauncherApp {
                 SwingUtilities.invokeLater(() -> {
                     accountSkinHeadImage = null;
                     accountAvatarPanel.repaint();
-                    skinPreviewPanel.showUnavailable(profileName, "Skin unavailable");
+                    skinPreviewPanel.showUnavailable(profileName, isElyServiceUnavailable(ex)
+                            ? "Ely.by unavailable"
+                            : "Skin unavailable");
                 });
             }
         }, "ely-skin-preview");
@@ -4043,6 +4084,74 @@ public final class LauncherApp {
             }
         }
         return null;
+    }
+
+    private ElySession tryUseSavedSessionWithoutRefresh(LauncherConfig currentConfig, String nickname, Exception ex) {
+        if (!isElyServiceUnavailable(ex)) {
+            return null;
+        }
+        if (!matchesSavedSession(currentConfig, nickname)) {
+            return null;
+        }
+        String normalizedUuid = safeTrim(currentConfig.savedProfileUuid).replace("-", "");
+        ElySession session = new ElySession(
+                currentConfig.savedAccessToken,
+                currentConfig.savedClientToken,
+                normalizedUuid,
+                currentConfig.savedProfileName,
+                false
+        );
+        log("Ely.by is unavailable. Using saved session without refresh for " + session.username() + ".");
+        return session;
+    }
+
+    private boolean matchesSavedSession(LauncherConfig currentConfig, String nickname) {
+        String savedAccessToken = safeTrim(currentConfig.savedAccessToken);
+        String savedClientToken = safeTrim(currentConfig.savedClientToken);
+        String savedProfileName = safeTrim(currentConfig.savedProfileName);
+        if (savedAccessToken.isBlank() || savedClientToken.isBlank() || savedProfileName.isBlank()) {
+            return false;
+        }
+        String normalizedNickname = safeTrim(nickname);
+        return normalizedNickname.isBlank() || savedProfileName.equalsIgnoreCase(normalizedNickname);
+    }
+
+    private boolean isElyServiceUnavailable(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof java.net.http.HttpTimeoutException
+                    || current instanceof java.net.ConnectException
+                    || current instanceof java.net.UnknownHostException
+                    || current instanceof java.net.NoRouteToHostException
+                    || current instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            String message = safeTrim(current.getMessage()).toLowerCase(Locale.ROOT);
+            if (message.contains("timed out")
+                    || message.contains("timeout")
+                    || message.contains("connection reset")
+                    || message.contains("connection refused")
+                    || message.contains("network is unreachable")
+                    || message.contains("no route to host")
+                    || message.contains("unknown host")
+                    || message.contains("cannot contact authentication server")
+                    || message.contains("authserver.ely.by")
+                    || message.contains("account.ely.by")) {
+                return true;
+            }
+            if (message.contains("http 502")
+                    || message.contains("http 503")
+                    || message.contains("http 504")
+                    || message.contains("http 520")
+                    || message.contains("http 521")
+                    || message.contains("http 522")
+                    || message.contains("http 523")
+                    || message.contains("http 524")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private String safeTrim(String value) {

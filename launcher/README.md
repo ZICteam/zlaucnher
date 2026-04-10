@@ -2,7 +2,7 @@
 
 Java launcher for the local Forge client in this repository.
 
-Current version: `2.0.3`
+Current version: `2.0.4`
 
 Features:
 - Ely.by authentication

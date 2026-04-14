@@ -2795,17 +2795,8 @@ public final class LauncherApp {
                     if (nickname.isBlank()) {
                         throw new IllegalStateException("Enter a nickname for offline mode.");
                     }
-                    ElySession refreshed = tryRefreshSavedSession(currentConfig, authenticator, nickname);
-                    if (refreshed != null) {
-                        session = refreshed;
-                        currentConfig.username = refreshed.username();
-                        this.config = currentConfig;
-                        currentConfig.save(configPath);
-                        log("Launching with saved Ely.by session as " + session.username());
-                    } else {
-                        session = ElySession.offline(nickname);
-                        log("Launching in offline mode as " + session.username() + " without Ely.by session");
-                    }
+                    session = ElySession.offline(nickname);
+                    log("Launching in offline mode as " + session.username() + " without Ely.by session");
                 } else {
                     String username = usernameField.getText().trim();
                     char[] password = passwordField.getPassword();
